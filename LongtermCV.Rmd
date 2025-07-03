@@ -1,0 +1,1561 @@
+---
+title: "Longtern_Rs_analysis"
+output: html_document
+---
+## install and load packages
+```{r preliminaries, message=TRUE, include=FALSE, echo=FALSE}
+# Set chunks defaults; these options will be applied to all subsequent chunks
+knitr::opts_chunk$set(results = 'hide', message = TRUE, include = TRUE, echo = FALSE,
+                      fig.height = 4.5, fig.width = 8, cache = T)
+# install.packages('cowplot')
+# Load required packages
+library(cowplot)
+library(data.table)
+library(ggplot2)
+theme_set(theme_bw())
+library(lubridate)
+library(kableExtra)
+library(cowplot)
+library("ggpubr")
+library(reshape)
+library(zoo)
+library(Kendall)
+library(tidyr)
+library(lubridate)
+library(maps)
+library(mapdata)
+library(lubridate)
+library(readr)
+library(lattice)
+library(grid)
+library(gridExtra)
+library(hexbin)
+library(dplyr)
+library(patchwork)
+library(cowplot)
+library(broom)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(fuzzyjoin)
+library(lwgeom)
+library(tidyverse)
+library(tidyr)
+library(drake)
+library(ncdf4) 
+library(scales)
+library(RColorBrewer)
+library(png)
+library(magick)
+library(tiff)
+library(BayesianTools)
+library(bayesplot)
+library(rstan)
+```
+
+## load functions
+```{r}
+library(readxl)
+source('Rcode/functions.R')
+
+```
+
+## prepare and load data
+
+```{r load data}
+OUTPUT_DIR		<- "outputs"
+DATA_DIR <- 'data'
+plot_dir <- "outputs/agu_slides/"
+# Jian: get data: directly read rather than using drake code
+# srdb_v4 <- drake::readd(srdb_v4) 
+srdb_v4 <- read.csv('srdbv4/srdbv4.csv', stringsAsFactors=F)
+srdb_v4$Q10_all <- coalesce(srdb_v4$Q10_0_10, srdb_v4$Q10_0_20, 
+                            srdb_v4$Q10_5_15, srdb_v4$Q10_10_20, srdb_v4$Q10_other1, srdb_v4$Q10_other2)
+# srdb_v5 <- drake::readd(srdb_v5)
+srdb_v5 <- read.csv('srdbv4/srdb-data.csv', stringsAsFactors=F)
+PT_Del <- read.csv('data/GlobalTempPrecipTimeSeries_Del.csv')
+longterm = read_xlsx('LongTerm.xlsx', 1)
+longterm_Tm = read_xlsx('LongTerm.xlsx', 2)
+# longterm <- drake::readd(LongTerm)
+# longterm_Tm <- drake::readd(LongTerm_tm)
+
+MGRsD = read.csv('data/MGRsD_V120240412_heat_moist_DOY.csv')
+MGRsD %>% 
+  filter(Rs_Norm > 0 & !is.na(Rs_Norm)) %>% 
+  mutate(RsLog = log(Rs_Norm)) ->
+  MGRsD
+
+longterm <- longterm %>% filter(!is.na(X1))
+
+IGBP <- read.csv("data/IGBP_Koppen_MODIS.csv")
+left_join(srdb_v4, IGBP, by = c("Lat_Round" = "Latitude", "Long_Round" = "Longitude")) ->
+  srdb_v4                                             
+
+srdb_v4 %>% 
+  dplyr::select(Q10_all, MiddleClimate) %>% 
+  filter(Q10_all < 10) %>% 
+  na.omit() %>% 
+  dplyr::group_by (MiddleClimate) %>% 
+  dplyr::summarise(Q10_mean = mean(Q10_all), obs = n(), se = sd(Q10_all)/sqrt(obs)) ->
+  srdb_v4_agg
+
+# cosore data
+cosore_all <- readRDS("data/cosore_all.rds")
+cosore_site <- read.csv("data/csr_site.csv")
+cosore_site$CSR_DATE_BEGIN <- as.Date(cosore_site$CSR_DATE_BEGIN, "%m/%d/%Y")
+cosore_site$CSR_DATE_END <- as.Date(cosore_site$CSR_DATE_END, "%m/%d/%Y")
+lm_results <- longtern_lm(longterm, longterm_Tm)
+```
+## Find long term (n\>4) studies from srdb-v5 and MGRsD
+
+```{r find out longterm studies from srdb}
+# get study number from srdb_v5 which have more than 5 years of Rs measurement
+# 10977 can be read from the fiture
+study_exc <- c(1654,2298,2656,2927,3197,3254,3301,3302,3581,4174,4333,4564,4864,4938,
+               5278,5519,5935,6347,6451,6504,6935,
+               7290,7636,10266,
+               # already in the longterm data
+  
+               # checked in srdb 
+               467,864,1980,2018,2601,2926,2960,
+               3390,4212,4234,4270,4979,5545,5984,6816,7087,
+               7613,8699,8700,9845,10449,10624,10820,10951,10977,11054,11913,
+               
+               # checked in mgrsd
+               4257,4883,5969,6576,7300,7659,9474,11083,11255,11878,11930,
+               
+               # checked github issue
+               4333,4348,10614,10466,11054,
+               
+               # checked srdb by study_number and site_id
+               1891,2056,2904,3053,4018,4442,4894,5162,5688,6438,6975,7634,8479,
+               8534,10066,10483,10564,10910,11366)
+
+## Find long term (n>4) studies from MGRsD
+MGRsD %>% 
+  dplyr::select(Study_number, Site_ID, Meas_Year) %>% 
+   dplyr::group_by(Study_number, Site_ID) %>% 
+   dplyr::count(Meas_Year) %>% 
+   dplyr::group_by(Study_number, Site_ID) %>% 
+   dplyr::summarise(n_year = n()) %>% 
+  filter(n_year > 4) %>% 
+  arrange(Study_number) %>% 
+  filter(Study_number %!in% study_exc)
+
+## Find long term (n>4) studies from srdb-v5
+srdb_v5 %>% 
+  filter(!is.na(Rs_annual)) %>% 
+  dplyr::select(Rs_annual, Study_number, YearsOfData) %>% 
+   dplyr::count(Study_number, YearsOfData) %>% 
+  filter(YearsOfData>=5 & Study_number %!in% study_exc)
+
+srdb_v5 %>% 
+  filter(!is.na(Rs_annual)) %>% 
+  dplyr::select(Rs_annual, Study_number, Site_ID) %>% 
+  dplyr::count(Study_number, Site_ID) %>% 
+  filter(Study_number %!in% study_exc) %>% 
+  filter(n > 4)
+```
+
+```{r data}
+# plot a site map for the long term data collected
+# Step 2: Plot
+# sort(unique(counties$region))
+cosore_site %>% 
+    filter(grepl('Rh', CSR_MSMT_VAR)) %>% 
+    mutate(Latitude = CSR_LATITUDE,
+           Longitude = CSR_LONGITUDE,
+           count = year(CSR_DATE_END) - year(CSR_DATE_BEGIN),
+           Data = "COSORE") %>% 
+    dplyr::select(Latitude, Longitude, count, Data) ->
+  csr_rh_site
+
+bind_rows(
+  MGRsD %>% 
+    dplyr::filter(!is.na(Rs_Norm)) %>% 
+    dplyr::select(Latitude, Longitude, Meas_Year, Study_number) %>% 
+    unique() %>% 
+    dplyr::group_by(Latitude, Longitude) %>% 
+    dplyr::summarise(count = n()) %>% 
+    dplyr::select(Latitude, Longitude, count) %>% 
+    mutate(Data = "DGRsD")
+)
+  
+  srdb_v4 %>% 
+    filter(!is.na(Q10_all) & !is.na(Latitude)) %>% 
+     dplyr::mutate(Meas_Year = Study_midyear) %>% 
+    dplyr::select(Latitude, Longitude, Meas_Year, Study_number) %>% 
+    unique() %>% 
+     dplyr::group_by(Latitude, Longitude) %>% 
+     dplyr::summarise(count = n()) %>% 
+    dplyr::select(Latitude, Longitude, count) %>% 
+    mutate(Data = "SRDB")
+  
+  csr_rh_site
+```
+```{r}
+lt <- read_csv("data/LongTerm.csv")
+lt_years <- lt %>% 
+  mutate(Year = map2(StartYear, count, ~ seq(.x, .x + .y - 1))) %>% 
+  dplyr::select(StudyID, Year) %>%   
+  unnest(Year)
+
+  Measure_year <- ggplot(lt_years, aes(x = Year)) +
+  geom_histogram(binwidth = 1, fill   = "grey80", color  = "white" ) +
+  geom_density( aes(y = ..count..), color = "black", size  = 1 ) +
+  annotate( "rect", xmin  = 1998, xmax = 2012, ymin  = 0,    ymax = Inf,
+    fill  = "skyblue", alpha = 0.5 ) +
+      annotate("text",x = (1998 + 2012) / 2,y = Inf, 
+           label = "Warming Hiatus",hjust = 0.5, vjust = 1.5,size  = 5,  fontface = "bold") + 
+  labs( x  = "Measurement Year", y = "Count", title = NULL ) +
+  theme_minimal() +
+  theme(
+    panel.grid   = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 1)
+  )
+print(Measure_year)
+#save_agu_plot("Measure_year.png", width = 6, height = 4)
+```
+##Calculates mean values and standard errors for temperature (first_b_tm) and soil respiration (first_b) slopes
+
+##Classifies data points into quadrants (I & III vs II & IV) based on slope signs and assigns colors (pink vs skyblue)
+```{r lm results}
+# Calculate means
+lm_results_mean <- tibble(
+  tm_slope_mean = lm_results$first_b_tm %>% mean(),
+  Rs_slope_mean = lm_results$first_b %>% mean(),
+  Rs_slope_se_mean = lm_results$first_b_se %>% mean(),
+  Year_mean = lm_results$n %>% mean() 
+  )
+
+lm_results <- lm_results %>%
+  mutate(
+    quadrant = case_when(
+      first_b_tm > 0 & first_b >  0 ~ "I & III",
+      first_b_tm < 0 & first_b <  0 ~ "I & III",
+      TRUE                           ~ "II & IV"
+    ),
+    col_group = ifelse(quadrant == "I & III", "pink", "skyblue")
+  )
+
+lm_mod <- lm(first_b ~ first_b_tm, data = lm_results)
+lm_sum <- summary(lm_mod)
+r2    <- lm_sum$r.squared
+pval  <- coef(lm_sum)[2, "Pr(>|t|)"]    # slope 的 p‐value
+label_text <- paste0(
+  "R² = ", round(r2, 3),", p = ", signif(pval, 2))
+
+x_range <- range(lm_results$first_b_tm, na.rm = TRUE)
+y_range <- range(lm_results$first_b, na.rm = TRUE)
+x_buffer <- 0.05 * diff(x_range)
+y_buffer <- 0.05 * diff(y_range)
+
+plot_lm_results2 <- ggplot() +
+  geom_rect(aes(xmin = 0, xmax = max(x_range) + x_buffer,
+        ymin = 0, ymax = max(y_range) + y_buffer),fill = "pink", alpha = 0.3) +
+  geom_rect(aes(xmin = min(x_range) - x_buffer, xmax = 0, ymin = min(y_range) - y_buffer, ymax = 0), fill = "pink", alpha = 0.3 ) +
+  geom_rect(aes(xmin = min(x_range) - x_buffer, xmax = 0, ymin = 0, ymax = max(y_range) + y_buffer),fill = "skyblue", alpha = 0.3) +
+  geom_rect(aes(xmin = 0, xmax = max(x_range) + x_buffer, ymin = min(y_range) - y_buffer, ymax = 0), fill = "skyblue", alpha = 0.3) +
+  
+   geom_point(
+    aes(x = first_b_tm, y = first_b),
+    shape = 21, fill = "white", color = "black",
+    size = 3, stroke = 0.5,
+    data = lm_results ) + 
+  geom_point(
+    aes(x = tm_slope_mean, y = Rs_slope_mean),
+    color = "black", size = 3.5,
+    data = lm_results_mean) +
+  geom_segment(
+    aes(x = tm_slope_mean,y = Rs_slope_mean - 2 * Rs_slope_se_mean,xend = tm_slope_mean,yend = Rs_slope_mean + 2 * Rs_slope_se_mean ),
+    color = "black", size = 1,
+    data = lm_results_mean ) +
+  
+  stat_smooth(method = "lm", se = TRUE, geom = "ribbon",aes(x = first_b_tm, y = first_b),
+    fill = NA, colour = "gray40", size = 0.4, data = lm_results) +
+  stat_smooth(
+    method = "lm", se = FALSE,aes(x = first_b_tm, y = first_b), colour = "grey50", size = 0.5, data = lm_results ) + 
+  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.5) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 0.5) +
+  
+  annotate("text", x = 0.38, y = 195, label = label_text, hjust = 1, vjust = 1, size = 3.4 ) +
+  labs(
+    x = expression(Slope ~ of ~ Air ~ Temperature ~ (degree*C~ year^-1)),
+    y = expression(Slope ~ of ~ Soil ~ respiration ~ (g ~ C ~ m^-2 ~ year^-2))
+  ) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank() 
+  )
+
+print(plot_lm_results2)
+#save_agu_plot("lm_overall_5.png", width = 6, height = 4)
+```
+##
+
+```{r site map, fig.height = 4, fig.width = 8}
+  longterm %>% 
+    dplyr::select(Latitude, Longitude, count) %>% 
+    mutate(Data = "longterm")
+
+TEMP_results <- lm_results %>%
+  mutate(TEMP_trend = case_when(
+     first_b_tm < 0 & p_b_tm >= 0.05 ~ "1TEMP_Decrease but not Significant",
+     first_b_tm < 0 & p_b_tm < 0.05 ~ "2TEMP_Significant Decrease",
+     first_b_tm > 0 & p_b_tm >= 0.05 ~ "3TEMP_Increase but not Significant",
+     first_b_tm > 0 & p_b_tm < 0.05 ~ "4TEMP_Significant Increase",))
+
+TEMP_group_counts <- TEMP_results %>%
+  dplyr::group_by(TEMP_trend) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::mutate(percentage = n / sum(n)) %>%
+  arrange(desc(TEMP_trend)) %>%
+  dplyr::mutate(midpoint = cumsum(percentage) - percentage / 2,
+         label_position = ifelse(n < 5, 4.9, 4.9),
+         segment_position = ifelse(n < 5, 4.6, 4.6),
+         hjust = ifelse(n < 5, 0, 0.5))
+
+#Colors <- c("#789cf2","#2279B0", "#EE9094" ,"#b12222" )
+Colors <- c("darkgray", "#5989A5","#FDCCA5" ,"#EF797E")
+
+names(Colors) <- c("1TEMP_Decrease but not Significant",  "2TEMP_Significant Decrease","3TEMP_Increase but not Significant", "4TEMP_Significant Increase")
+labels <- c("Insignificant Decrease", "Significant Decrease", "Insignificant Increase", "Significant Increase")
+
+plot_TEMP <- ggplot(data = TEMP_group_counts) +  
+  geom_bar(aes(x = 3.9, y = percentage, fill = TEMP_trend), stat = "identity", width = 1.2, color = "white", linewidth = 0.8) +
+  coord_polar("y", start = -pi / -20) +
+  scale_fill_manual(values = Colors, labels = labels, name = NULL) +
+  theme_void() +
+  xlim(0, 4.95)  +
+ theme(legend.position = "right",
+     legend.key.width = unit(0.5, "cm"),
+     legend.key.height = unit(0.2, "cm"),
+     plot.tag = element_text(size = 22), 
+     plot.tag.position = c(0.2, 0.8)) +
+  labs( fill = "Trend") +
+  annotate("text", x = 0, y = 0, label = "Tair", size = 6, fontface = "bold") +
+  geom_text(aes(x = label_position, y = midpoint, label = n, hjust = hjust), size = 3.8, color = "black") +
+  geom_segment(data = TEMP_group_counts %>% filter(n < 5), 
+               aes(x = 3.9, xend = segment_position, y = midpoint, yend = midpoint),
+               color = "black")
+plot_TEMP
+
+
+TEMP_results <- TEMP_results %>%
+  left_join(longterm %>% dplyr::select(SiteID, Latitude, Longitude, count), by = c("ID" = "SiteID"))
+longterm_sites <- TEMP_results %>% filter(TEMP_trend != "TEMP_Significant Increase")
+significant_increase_sites <- TEMP_results %>% filter(TEMP_trend == "TEMP_Significant Increase")
+Colors <- c("1TEMP_Decrease but not Significant" = "darkgray",  "2TEMP_Significant Decrease" = "#5989A5", 
+            "3TEMP_Increase but not Significant" = "#FDCCA5", "4TEMP_Significant Increase" = "#EF797E")
+
+size_legend_plot <- ggplot(data = longterm_sites, aes(x = Longitude, y = Latitude, size = n)) +
+  geom_point(color = "black", alpha = 0.8, shape = 1) +
+  scale_size_continuous(name = "Successive Measurement Duration (yr)") + 
+  guides(size = guide_legend(
+    direction = "horizontal",
+    title.position = "top",
+    title.hjust = 0.5
+  )) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.justification = "center",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    legend.background = element_rect(fill = scales::alpha("white", 0.1), color = NA)
+  )
+print(size_legend_plot)
+size_legend <- get_legend(size_legend_plot)
+
+main_site <- ggplot(data = map_data("world")) + 
+  geom_polygon(aes(x = long, y = lat, group = group), color = "lightgrey", fill = 'white') +
+  guides(fill = FALSE) +
+  geom_jitter(data = longterm_sites, aes(x = Longitude, y = Latitude, size = count, color = TEMP_trend), 
+              stroke = 1, shape = 21) +
+  geom_jitter(data = significant_increase_sites, aes(x = Longitude, y = Latitude, size = count, color = TEMP_trend), 
+              stroke = 1, shape = 21) +
+  scale_x_continuous(name = NULL, breaks = seq(-180, 180, 60), labels = seq(-180, 180, 60)) +
+  scale_y_continuous(limits = c(-60, 90), name = NULL,breaks = seq(-60, 90, 30), labels = seq(-60, 90, 30)) +
+  scale_size_continuous(name = "Years (yr)") +
+  scale_color_manual(
+    values = Colors, 
+    labels = c("1TEMP_Decrease but not Significant" = "Decrease but not Significant", 
+               "2TEMP_Significant Decrease" = "Significant Decrease", 
+               "3TEMP_Increase but not Significant" = "Increase but not Significant", 
+               "4TEMP_Significant Increase" = "Significant Increase"),
+    name = "Site Type") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = c(0.03, 0.03), legend.justification = c(0, 0),
+        legend.key.size = unit(0.5, "cm"), legend.text = element_text(size = 8),
+        legend.title = element_text(size = 8)) +
+   guides(size = "none", color = guide_legend(order = 2))
+
+site_plot2 <- ggdraw() +
+  draw_plot(main_site) +
+  draw_plot(size_legend, x = 0.28, y = 0.1, width = 0.5, height = 0.15)
+print(site_plot2)
+
+suc_meas_years <- data.frame(n = lm_results$n)
+plot_years <- ggplot(data = suc_meas_years) +
+  geom_histogram(aes(x = n), bins = 50) +
+  labs( x = "Successive Measurement Duration (yr)", y = "Count")+
+  theme_minimal()+
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA))  
+plot_years
+
+IGBP$Latitude <- round(IGBP$Latitude, 1)
+IGBP$Longitude <- round(IGBP$Longitude, 1)
+matched_data <- difference_inner_join(IGBP, longterm, by = c("Latitude", "Longitude"),  max_dist = 0.27)
+ecosystem_counts <- matched_data %>%
+  dplyr::count(Ecosystem)
+ecosystem_percentages <- ecosystem_counts %>%
+  mutate(percentage = n / sum(n)) %>%
+  arrange(desc(Ecosystem)) %>%
+  mutate(cumulative = cumsum(percentage))
+ecosystem_percentages <- ecosystem_percentages %>%
+  mutate(midpoint = cumulative - (0.5 * percentage))
+ecosystem_percentages <- ecosystem_percentages %>%
+  mutate(label_position = ifelse(n < 5, 4.6, 3.3),  
+         segment_position = ifelse(n < 5, 4.2, 3),  
+         hjust = ifelse(n < 5, 0, 0.5)) 
+
+plot_ecosystem <- ggplot(data = ecosystem_percentages) +
+  geom_bar(aes(x =3.1, y = percentage, fill = Ecosystem), 
+           stat = "identity", width = 1.0, color = "white", linewidth = 0.7) +
+  coord_polar("y", start = -pi / -60) +
+  theme_void() +
+  xlim(0, 4.98)  +
+  theme(
+    legend.position = "right",
+    legend.key.width = unit(0.5, "cm"),
+    legend.key.height = unit(0.2, "cm"),
+    plot.tag = element_text(size = 22), 
+    plot.tag.position = c(0.1, 0.8) 
+  ) +
+  scale_fill_discrete(breaks = rev(ecosystem_percentages$Ecosystem), name = NULL) +
+  geom_segment(aes(x = 3.2, xend = segment_position, y = midpoint, yend = midpoint), 
+               data = ecosystem_percentages %>% filter(n < 5), color = "grey30") +
+  geom_text(aes(x = label_position, y = midpoint, label = n, hjust = hjust), size = 4)
+print(plot_ecosystem)
+
+
+LM_RESULT <- lm_results %>%
+  mutate(Trend_RESULT = case_when(
+    first_b < 0 & p_b >= 0.05 ~ "1 Decrease but not Significant",
+    first_b < 0 & p_b < 0.05 ~ "2 Significant Decrease",
+    first_b > 0 & p_b >= 0.05 ~ "3 Increase but not Significant",
+    first_b > 0 & p_b < 0.05 ~ "4 Significant Increase")) 
+LM_RESULT_group_counts <- LM_RESULT %>%
+  dplyr::group_by(Trend_RESULT) %>%
+  dplyr::summarise(n = n()) %>%
+  dplyr::mutate(percentage = n / sum(n)) %>%
+  arrange(desc(Trend_RESULT)) %>%
+  mutate(midpoint = cumsum(percentage) - percentage / 2,
+         label_position = ifelse(n < 5, 4.8, 4.8),
+         segment_position = ifelse(n < 5, 4.6, 4.6),
+         hjust = ifelse(n < 5, 0, 0.5)) 
+cColors <- c("darkgray", "#5989A5","#FDCCA5" ,"#EF797E")
+names(Colors) <- c("1 Decrease but not Significant", "2 Significant Decrease", "3 Increase but not Significant", "4 Significant Increase")
+labels <- c("Insignificant Decrease", "Significant Decrease", "Insignificant Increase", "Significant Increase")
+
+plot_LM_RESULT <- ggplot(data = LM_RESULT_group_counts) + 
+  geom_bar( aes(x = 3.9, y = percentage, fill = Trend_RESULT), stat = "identity", width = 1.2, color = "white", linewidth = 0.8) +
+   coord_polar("y", start = -pi / -20) +
+   scale_fill_manual(values = Colors, labels = labels, name = NULL) +
+   theme_void() +
+   xlim(0, 4.95)  + 
+   theme(legend.position = "right",
+      legend.key.width = unit(0.5, "cm"),
+      legend.key.height = unit(0.2, "cm"),
+      plot.tag = element_text(size = 22), 
+      plot.tag.position = c(0.2, 0.8)) +
+   labs( fill = "Trend") +
+  annotate("text", x = 0, y = 0, label = "Rs", size = 7, fontface = "bold")+
+  geom_text(aes(x = label_position, y = midpoint, label = n, hjust = hjust), size = 3.8, color = "black") +
+  geom_segment(data = LM_RESULT_group_counts %>% filter(n < 5), 
+               aes(x = 3.9, xend = segment_position, y = midpoint, yend = midpoint),
+               color = "black") 
+plot_LM_RESULT
+
+row1 <- plot_grid(site_plot2, plot_TEMP, 
+                  ncol = 2, rel_widths = c(2, 1))
+row2 <- plot_grid(plot_years, plot_LM_RESULT, 
+                  ncol = 2, rel_widths = c(2, 1))
+row3 <- plot_grid(Measure_year, plot_ecosystem, 
+                  ncol = 2, rel_widths = c(2, 1))
+
+combined_plot <- plot_grid(row1, row2, row3, ncol = 1)
+print(combined_plot)
+#save_agu_plot("plot_Fig1N6.png", width = 10.5, height = 9)
+```
+
+## Possible reason- instantaneous variabilityn (Measurement Variance within COSORE variability).
+
+The median measurement error here is \~`r round(median_interann_cv * 100, 0)`% for `r nrow(srdb_v5_sub)` observations of fluxes between `r round(min(srdb_v5_sub$Rs_annual, na.rm = T))` and `r round(max(srdb_v5_sub$Rs_annual, na.rm = T))` g C/m2/year.
+```{r cv12, echo = FALSE}
+cosore_all %>% 
+  dplyr::mutate(ID_day = paste0(dset, "-", CSR_PORT, "-", year(CSR_TIMESTAMP_END),"-",
+                         month(CSR_TIMESTAMP_END), "-", day(CSR_TIMESTAMP_END))) %>% 
+  dplyr::group_by(ID_day) %>%
+  dplyr::summarise(n = n(), meanFlux = mean(CSR_FLUX_CO2),
+            cv = sd(CSR_FLUX_CO2) / mean(CSR_FLUX_CO2)) %>% 
+  filter(n > 2) ->
+  meas_error_1
+median_error <- median(meas_error_1$cv)
+
+ggplot(meas_error_1, aes(x = cv)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  scale_x_continuous(labels = scales::percent, limits = c(-0.1, 1)) +
+  geom_vline(xintercept = median_error, color = "red") +
+  ylab("Count") + 
+  xlab("CV between successive IRGA measurements") -> plot_IRGA_cv
+
+plot_IRGA_cv
+#save_agu_plot("licor12_cv.png", width = 6, height = 4)         
+```
+
+## What if the meaure error was added to the soil respiration trend?
+```{r hashimoto, echo=FALSE}
+ #Downloaded August 25, 2017 from http://cse.ffpri.affrc.go.jp/shojih/data/index.html
+ncfiles_RH <- c("data/extdata/RH_yr_Hashimoto2015.nc")
+nc_RH <- nc_open("data/extdata/RH_yr_Hashimoto2015.nc")  # change to [1]
+co2_RH <- ncvar_get(nc_RH, "co2", start = c(1, 1, 1, 1), count = c(-1, -1, 1, 112))        
+lon_RH <- ncvar_get(nc_RH, varid = nc_RH$dim$lon$name)
+lat_RH <- ncvar_get(nc_RH, varid = nc_RH$dim$lat$name)  
+nc_close(nc_RH)
+
+ncfiles_Rs <- c("data/extdata/RS_yr_Hashimoto2015.nc")
+nc_RS <- nc_open("data/extdata/RS_yr_Hashimoto2015.nc")  # change to [1]
+co2_RS <- ncvar_get(nc_RS, "co2", start = c(1, 1, 1, 1), count = c(-1, -1, 1, 112))        
+lon_RS <- ncvar_get(nc_RS, varid = nc_RS$dim$lon$name)
+lat_RS <- ncvar_get(nc_RS, varid = nc_RS$dim$lat$name)  
+nc_close(nc_RS)
+#u can test
+lattice::levelplot(co2_RH[,,1])   
+co2_fuzz_RH <- fuzz(co2_RH, error = median_error)
+lattice::levelplot(co2_RS[,,1])   
+co2_fuzz_RS <- fuzz(co2_RS, error = median_error)
+
+do_fitting <- function(data, lon, lat, start_year = 1901) {
+  nyears <- dim(data)[3]
+  results <- list()
+  for (i in seq_along(lon)) {
+    for (j in seq_along(lat)) {
+      ts_data <- data[i, j, ]
+      if (all(is.na(ts_data))) next 
+      final_slope <- NA
+      final_signif <- NA
+      final_year_index <- NA 
+      for (n in 2:nyears) {
+        df <- tibble(year_index = 1:n, data = ts_data[1:n]) %>% drop_na()
+        
+        if (nrow(df) > 1) {
+          lm_fit <- lm(data ~ year_index, data = df)
+          current_slope <- coef(lm_fit)["year_index"]
+          current_signif <- summary(lm_fit)$coefficients["year_index", "Pr(>|t|)"]
+          final_slope <- current_slope
+          final_signif <- current_signif
+          if (!is.na(current_signif) && current_signif < 0.05) {
+            final_year_index <- n  
+            break 
+          }
+        }
+      }
+      results <- c(results, list(list(
+        lon = lon[i], 
+        lat = lat[j], 
+        slope = final_slope, 
+        signif = final_signif, 
+        analyzed_until = ifelse(!is.na(final_year_index), n, NA)
+      )))
+    }
+  }
+  results_df <- bind_rows(results)
+  return(results_df)
+}
+```
+
+## Time series analysis for each cell
+Jian:take ~2 hours, updated to drake
+
+```{r drake co2}
+#Use the `fuzz` function to add median cv to the CO2 data. Store the result in`co2_fuzz`.
+# Use the `do_fitting` function to perform fitting analysis on the CO2 data with added error, `co2_fuzz`, and store the result in `out_fuzz`.
+
+#plan = drake_plan(
+   # out_RH = do_fitting(co2_RH, lon_RH, lat_RH),  
+   # out_fuzz_RH = do_fitting(co2_fuzz_RH, lon_RH, lat_RH),
+   # out_RS = do_fitting(co2_RS, lon_RS, lat_RS),  
+   # out_fuzz_RS = do_fitting(co2_fuzz_RS, lon_RS, lat_RS))
+#make(plan)
+#drake::drake_cache("D:/git/Github/Longterm/.drake")$unlock()
+```
+
+## plot the results
+```{r}
+out_RH <- drake::readd(out_RH)
+summary(as.vector(out_RH$slope))
+#out_corrected <- out %>% mutate(lon_corrected = ifelse(lon > 180, lon - 360, lon)) 
+out_RH$lon <- ifelse(out_RH$lon > 180, out_RH$lon - 360, out_RH$lon)
+
+out_filtered_RH <- out_RH %>%
+  filter(!is.na(slope), !is.na(signif)) %>%
+  mutate(
+    Group = case_when(
+      slope < 0 & signif < 0.05 ~ "DEC_SIG",
+      slope < 0 & signif >= 0.05 ~ "DEC_INSIG",
+      slope > 0 & signif >= 0.05 ~ "INC_INSIG",
+      slope > 0 & signif < 0.05 ~ "INC_SIG"))
+#--------------------------------------------------------------------------------------------------------
+out_RS <- drake::readd(out_RS)
+summary(as.vector(out_RS$slope))
+#out_corrected <- out %>% mutate(lon_corrected = ifelse(lon > 180, lon - 360, lon)) 
+out_RS$lon <- ifelse(out_RS$lon > 180, out_RS$lon - 360, out_RS$lon)
+
+out_filtered_RS <- out_RS %>%
+  filter(!is.na(slope), !is.na(signif)) %>%
+  mutate(
+    Group = case_when(
+      slope < 0 & signif < 0.05 ~ "DEC_SIG",
+      slope < 0 & signif >= 0.05 ~ "DEC_INSIG",
+      slope > 0 & signif >= 0.05 ~ "INC_INSIG",
+      slope > 0 & signif < 0.05 ~ "INC_SIG"))
+```
+
+```{r}
+plot_group_distribution <- function(
+    df, world_robin, grat_robin, color_vec, pie_labels,
+    pie_xlim = c(0.5, 4), pie_x = 3, pie_width = 1.6, pie_text_size = 3.8,
+    pie_grob_area = list(xmin = -1.5e7, xmax = -0.7e7, ymin = -6e6, ymax = 1.2e6),
+    point_size = 0.25,
+    map_xlim = c(-1.7e7, 1.7e7), map_ylim = c(-5.7e6, 9e6),
+    map_title = "a"
+){
+group_prop <- df %>%
+  dplyr::group_by(Group) %>%
+  dplyr::summarise(Count = dplyr::n()) %>%
+  dplyr::mutate(Percentage = Count / sum(Count) * 100)
+  
+  plot_pie <- ggplot(group_prop) +
+    geom_bar(aes(x = pie_x, y = Percentage, fill = Group),
+             stat = "identity", width = pie_width, color = "white", size = 0.2) +
+    coord_polar("y", start = 0) +
+    theme_void() +
+    xlim(pie_xlim) +
+    scale_fill_manual(values = color_vec) +
+    geom_text(
+      aes(
+        x = pie_x, 
+        y = Percentage/2 + c(0, cumsum(Percentage)[-length(Percentage)]),
+        label = pie_labels
+      ),
+      color = "black", size = pie_text_size
+    ) +
+    theme(legend.position = "none")
+  pie_grob <- ggplotGrob(plot_pie)
+  
+  points_sf <- st_as_sf(df, coords = c("lon", "lat"), crs = 4326)
+  points_robin <- st_transform(points_sf, crs = st_crs(world_robin))
+  
+  plot_map <- ggplot() +
+    geom_sf(data = world_robin, fill = "gray95", color = "grey35", linewidth = 0.2) +
+    geom_sf(data = grat_robin, color = "gray80", linewidth = 0.25) +
+    geom_sf(data = points_robin, aes(color = Group), size = point_size, shape = 15) +
+    annotation_custom(
+      grob = pie_grob,
+      xmin = pie_grob_area$xmin, xmax = pie_grob_area$xmax,
+      ymin = pie_grob_area$ymin, ymax = pie_grob_area$ymax
+    ) +
+    scale_color_manual(values = color_vec) +
+    coord_sf(
+      xlim = map_xlim, ylim = map_ylim,
+      crs = st_crs(world_robin),
+      label_graticule = "SW"
+    ) +
+    labs(title = map_title, x = NULL, y = NULL) +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(),
+      panel.background = element_blank(),
+      axis.text = element_text(color = "black", size = 8),
+      axis.title = element_blank(),
+      panel.border = element_blank(),
+      legend.position = "none"
+    )
+  return(plot_map)
+}
+
+group_colors <- c("INC_SIG" = "#EF797E", "DEC_INSIG" = "gray", "INC_INSIG" = "#FDCCA5", "DEC_SIG" = "#5989A5")
+
+# RH
+plot_4group_distribution_RH <- plot_group_distribution(
+  out_filtered_RH,
+  world_robin,
+  grat_robin,
+  color_vec = group_colors,
+  pie_labels = c("0.9%", "46.4%", "3.8%", "49.0%")
+)
+print(plot_4group_distribution_RH)
+
+# RS
+plot_4group_distribution_RS <- plot_group_distribution(
+  out_filtered_RS,
+  world_robin,
+  grat_robin,
+  color_vec = group_colors,
+  pie_labels = c("0.9%", "46.5%", "3.7%", "48.9%")
+)
+print(plot_4group_distribution_RS)
+
+```
+
+```{r}
+# plot density, the red vline is mean vaule
+plot_sig_year_hist <- function(data, year_col) {
+  mval <- mean(data[[year_col]], na.rm = TRUE)
+  ggplot(data, aes(x = .data[[year_col]])) + 
+    geom_histogram(bins = 30, fill = "gray", col = "black") +
+    geom_vline(xintercept = mval, color = "red", size=1) +
+    ylab("Count") + 
+    xlab("Successive Measurement Duration (yr)")
+}
+
+#  plot density of bootstrap, the red vline is mean vaule
+plot_bootstrap_mean_hist <- function(data, year_col, boots_n = 1000, sample_size = 50) {
+  boots_mean <- function(data, size) {
+    sample_data <- sample(data[!is.na(data)], size, replace = TRUE)
+    mean(sample_data)
+  }
+  means <- replicate(boots_n, boots_mean(data[[year_col]], sample_size))
+  means_df <- data.frame(Mean = means)
+  mval <- mean(means_df$Mean, na.rm = TRUE)
+  plt <- ggplot(means_df, aes(x = Mean)) +
+    geom_histogram(bins = 30, fill = "gray", col = "black") +
+    geom_vline(xintercept = mval, color = "red", size=1) +
+    ylab("Count") +
+    xlab("Bootstrap Mean Successive Measurement Duration (yr)")
+  list(plot = plt, mean = mval)
+}
+
+#  plot golbal dostribution map with pie plot
+plot_group_map_pie_auto <- function(
+    data, analyzed_col = "analyzed_until", lon = "lon", lat = "lat",
+    world_robin, grat_robin, 
+    breaks = c(4, 20, 40, 60, 80, 100, 112),
+    colors = c("#faee85", "#70c17f",  "#f7afb9",  "#8b66b8", "#51c4c2", "#c3e2ec"),
+    pie_x = 3, pie_xlim = c(0.5, 4.5),
+    pie_grob_area = list(xmin = -1.9e7, xmax = -0.5e7, ymin = -7e6, ymax = 1.6e6),
+    map_xlim = c(-1.7e7, 1.7e7), map_ylim = c(-5.7e6, 9e6), 
+    map_title = "b"
+) {
+  labels <- paste0(breaks[-length(breaks)], "~", breaks[-1])
+  data$Group <- cut(data[[analyzed_col]], breaks = breaks, labels = labels, include.lowest = TRUE)
+  group_levels <- levels(data$Group)
+  colors_named <- setNames(colors, group_levels)
+  filtered_data <- data[!is.na(data$Group), ]
+  
+  group_counts <- filtered_data %>%
+    dplyr::group_by(Group) %>%
+    dplyr::summarise(Count = dplyr::n()) %>%
+    dplyr::mutate(
+      Percentage = Count / sum(Count) * 100,
+      percent_label = paste0(sprintf("%.1f", Percentage), "%")
+    ) %>%
+    dplyr::arrange(desc(Group)) %>%
+    dplyr::mutate(
+      ypos = cumsum(Percentage) - 0.5 * Percentage,
+      outside = Percentage < 10
+    )
+  big_labels <- dplyr::filter(group_counts, !outside)
+  small_labels <- dplyr::filter(group_counts, outside)
+  
+  plot_pie <- ggplot(group_counts, aes(x = pie_x, y = Percentage, fill = Group)) +
+    geom_bar(stat = "identity", width = 1.6, color = "white", size = 0.2) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(pie_xlim) +
+    scale_fill_manual(values = colors_named) +
+    theme_void() +
+    theme(legend.position = "none") +
+    geom_text(data = big_labels, aes(y = ypos, x = 2.8, label = percent_label),
+              color = "black", size = 3.8, inherit.aes = FALSE) +
+    geom_text(data = small_labels, aes(y = ypos, x = 4.1, label = percent_label),
+              color = "black", size = 3.8, hjust = 0, inherit.aes = FALSE) +
+    geom_segment(data = small_labels,
+                 aes(x = 3.5, xend = 4.1, y = ypos, yend = ypos),
+                 color = "black", linewidth = 0.3, inherit.aes = FALSE)
+  pie_grob <- ggplotGrob(plot_pie)
+  
+  points_sf <- st_as_sf(filtered_data, coords = c(lon, lat), crs = 4326)
+  points_robin <- st_transform(points_sf, crs = st_crs(world_robin))
+  
+  ggplot() +
+    geom_sf(data = world_robin, fill = "gray95", color = "grey35", linewidth = 0.2) +
+    geom_sf(data = grat_robin, color = "gray80", linewidth = 0.25) +
+    geom_sf(data = points_robin, aes(color = Group), size = 0.25, shape = 15) +
+    scale_color_manual(values = colors_named, labels = group_levels) +
+    coord_sf(xlim = map_xlim, ylim = map_ylim, crs = st_crs(world_robin), label_graticule = "SW") +
+    annotation_custom(grob = pie_grob, 
+                     xmin = pie_grob_area$xmin, xmax = pie_grob_area$xmax,
+                     ymin = pie_grob_area$ymin, ymax = pie_grob_area$ymax) +
+    labs(title = map_title, x = NULL, y = NULL, color = "First Year of Significance") +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(),
+      panel.background = element_blank(),
+      axis.text = element_text(color = "black", size = 8),
+      axis.title = element_blank(),
+      panel.border = element_blank(),
+      legend.position = "none"
+    )
+}
+#RH
+plot_sig_year_hist(inc_sig_data_RH, "inc_sig_year")
+plot_bootstrap_mean_hist(inc_sig_data_RH, "inc_sig_year")$plot
+plot_group_map_pie_auto(
+  data = inc_sig_data_RH,
+  analyzed_col = "analyzed_until",
+  lon = "lon",
+  lat = "lat",
+  world_robin = world_robin,
+  grat_robin = grat_robin
+)
+
+#RS
+plot_sig_year_hist(inc_sig_data_RS, "inc_sig_year")
+plot_bootstrap_mean_hist(inc_sig_data_RS, "inc_sig_year")$plot
+plot_group_map_pie_auto(
+  data = inc_sig_data_RS,
+  analyzed_col = "analyzed_until",
+  lon = "lon",
+  lat = "lat",
+  world_robin = world_robin,
+  grat_robin = grat_robin
+)
+
+```
+
+
+```{r}
+# density of p value
+plot_pvalue_hist <- function(data, p_col, bins = 30, title = NULL) {
+  tibble::tibble(pval = as.vector(unlist(data[[p_col]]))) %>%
+    na.omit() %>%
+    ggplot(aes(x = pval)) + 
+    geom_histogram(bins = bins, fill = "gray", col = "black") +
+    geom_vline(xintercept = 0.05, color = "red") +
+    ylab("Count") +
+    xlab("p value of time series trend") +
+    {if (!is.null(title)) ggtitle(title) else NULL}
+}
+
+plot_signif_RH <- plot_pvalue_hist(out_RH, "signif")
+plot_signif_RS <- plot_pvalue_hist(out_RS, "signif")
+
+```
+
+## Re-do analysis with assumed error rate
+```{r fuzz, echo=FALSE}
+group_trend_significance <- function(df, slope_col = "slope", signif_col = "signif") {
+  df %>%
+    dplyr::filter(!is.na(.data[[slope_col]]), !is.na(.data[[signif_col]])) %>%
+    dplyr::mutate(
+      Group = dplyr::case_when(
+        .data[[slope_col]] < 0 & .data[[signif_col]] < 0.05 ~ "DEC_SIG",
+        .data[[slope_col]] < 0 & .data[[signif_col]] >= 0.05 ~ "DEC_INSIG",
+        .data[[slope_col]] > 0 & .data[[signif_col]] >= 0.05 ~ "INC_INSIG",
+        .data[[slope_col]] > 0 & .data[[signif_col]] < 0.05 ~ "INC_SIG",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    dplyr::filter(!is.na(Group))
+}
+group_colors <- c(
+  "INC_SIG" = "#EF797E",
+  "DEC_INSIG" = "gray",
+  "INC_INSIG" = "#FDCCA5",
+  "DEC_SIG" = "#5989A5"
+)
+
+# RH
+fuzz_filtered_RH <- group_trend_significance(out_fuzz_df_RH)
+plot_group_map_pie(
+  data = fuzz_filtered_RH,
+  world_robin = world_robin,
+  grat_robin = grat_robin,
+  colors = group_colors
+)
+
+# RS
+fuzz_filtered_RS <- group_trend_significance(out_fuzz_df_RS)
+plot_group_map_pie(
+  data = fuzz_filtered_RS,
+  world_robin = world_robin,
+  grat_robin = grat_robin,
+  colors = group_colors
+)
+
+```
+
+```{r}
+plot_duration_map <- function(
+    data, 
+    lon = "lon", lat = "lat", fill = "analyzed_until",
+    world_continents, 
+    title = NULL,
+    low_color = "#b4e5f7", high_color = "#422a7e"
+) {
+  ggplot(data = data) +
+    geom_tile(aes(x = .data[[lon]], y = .data[[lat]], fill = .data[[fill]])) +
+    scale_fill_gradient(
+      low = low_color, high = high_color,
+      name = "Successive Measurement Duration (yr)",
+      na.value = "grey50",
+      limits = c(min(data[[fill]], na.rm = TRUE), max(data[[fill]], na.rm = TRUE))
+    ) +
+    labs(title = title, x = NULL, y = NULL) +
+    theme(
+      legend.position = "none",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    ) +
+    geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black") +
+    coord_sf(xlim = c(-180, 180), ylim = c(-60, 90), expand = FALSE)
+}
+
+get_duration_legend <- function(
+    data, 
+    fill = "analyzed_until",
+    low_color = "#b4e5f7", high_color = "#422a7e"
+) {
+  p <- ggplot(data, aes(x = 0, y = 0, fill = .data[[fill]])) +
+    geom_tile() +
+    scale_fill_gradient(
+      low = low_color, high = high_color,
+      name = "Successive Measurement Duration (yr)",
+      limits = c(min(data[[fill]], na.rm = TRUE), max(data[[fill]], na.rm = TRUE)),
+      guide = guide_colorbar(
+        barwidth = 12, barheight = 0.5,
+        title.position = "left", title.hjust = 0.5
+      )
+    ) +
+    theme_void() +
+    theme(
+      legend.position = "bottom",
+      legend.text = element_text(size = 9),
+      legend.title = element_text(size = 10),
+      legend.background = element_rect(fill = scales::alpha("white", 0.6), color = NA)
+    )
+  cowplot::get_legend(p)
+}
+
+combine_duration_maps <- function(
+    PFC_RS, PFC_RH, fuzz_PFC_RS, fuzz_PFC_RH, legend_grob
+) {
+  combined_PFC <- cowplot::plot_grid(PFC_RS, PFC_RH, ncol = 2, rel_widths = c(1, 1))
+  combined_fuzz_PFC <- cowplot::plot_grid(fuzz_PFC_RS, fuzz_PFC_RH, ncol = 2, rel_widths = c(1, 1))
+  ggdraw() +
+    draw_plot(combined_PFC, x = 0, y = 0.5, width = 1, height = 0.5) +
+    draw_plot(combined_fuzz_PFC, x = 0, y = 0.08, width = 1, height = 0.5) +
+    draw_grob(legend_grob, x = 0.1, y = 0.05, width = 0.8, height = 0.1)
+}
+
+PFC_RH <- plot_duration_map(inc_sig_fuzz_data_RH, world_continents = world_continents, title = "d")
+PFC_RS <- plot_duration_map(inc_sig_fuzz_data_RS, world_continents = world_continents, title = "c")
+fuzz_PFC_RH <- plot_duration_map(inc_sig_fuzz_data_RH, world_continents = world_continents, title = "d")
+fuzz_PFC_RS <- plot_duration_map(inc_sig_fuzz_data_RS, world_continents = world_continents, title = "c")
+
+legend_grob <- get_duration_legend(inc_sig_fuzz_data_RH)
+
+final_combined_fuzz_PFC <- combine_duration_maps(PFC_RS, PFC_RH, fuzz_PFC_RS, fuzz_PFC_RH, legend_grob)
+print(final_combined_fuzz_PFC)
+
+#--------------------------------------------------------------------------------------------------------------------------------------------
+# Set both inc_sig_year and analyzed_until of INC_INSIG to 112.
+preprocess_inc_sig_year <- function(df, group_col = "Group", analyzed_col = "analyzed_until", slope_col = "slope", insig_val = 112) {
+  df %>%
+    dplyr::mutate(
+      inc_sig_year = ifelse(.data[[group_col]] == "INC_INSIG", insig_val, 
+                            sapply(.data[[analyzed_col]], function(x) if(length(x) > 0) x[1] else NA)),
+      !!analyzed_col := ifelse(.data[[group_col]] == "INC_INSIG", insig_val, .data[[analyzed_col]])
+    ) %>%
+    dplyr::filter(.data[[slope_col]] > 0 | .data[[group_col]] == "INC_INSIG")
+}
+
+inc_sig_fuzz_data_RH <- preprocess_inc_sig_year(out_fuzz_filtered_RH)
+inc_sig_fuzz_data_RS <- preprocess_inc_sig_year(out_fuzz_filtered_RS)
+
+plot_fuzz_Positive_first_change_hist_RH <- plot_sig_year_hist(inc_sig_fuzz_data_RH, "inc_sig_year") +
+  ggtitle("Coefficient of Variance (19% of Rs Mean)")
+plot_fuzz_Positive_first_change_hist_RS <- plot_sig_year_hist(inc_sig_fuzz_data_RS, "inc_sig_year") +
+  ggtitle("Coefficient of Variance (19% of Rs Mean)")
+
+plot_fuzz_bootstrap_hist_RH <- plot_bootstrap_mean_hist(inc_sig_fuzz_data_RH, "inc_sig_year")$plot +
+  ggtitle("Coefficient of Variance (19% of Rs Mean)")
+plot_fuzz_bootstrap_hist_RS <- plot_bootstrap_mean_hist(inc_sig_fuzz_data_RS, "inc_sig_year")$plot +
+  ggtitle("Coefficient of Variance (19% of Rs Mean)")
+
+plot_fuzz_Positive_first_change_hist_RH
+plot_fuzz_bootstrap_hist_RH
+plot_fuzz_Positive_first_change_hist_RS
+plot_fuzz_bootstrap_hist_RS
+
+
+#-------------------------------------------------------------------------------------------------------------------------------------
+
+breaks <- c(4, 20, 40, 60, 80, 100, 112)
+labels <- c("4~20", "20~40", "40~60", "60~80", "80~100", "100~112")
+colors <- c("#faee85", "#70c17f", "#f7afb9", "#8b66b8", "#51c4c2", "#c3e2ec")
+
+inc_sig_fuzz_data_RH$Group <- cut(inc_sig_fuzz_data_RH$analyzed_until, breaks = breaks, labels = labels, include.lowest = TRUE)
+inc_sig_fuzz_data_RS$Group <- cut(inc_sig_fuzz_data_RS$analyzed_until, breaks = breaks, labels = labels, include.lowest = TRUE)
+
+colors_named <- setNames(colors, labels)
+G_PFC_fuzz_RH <- plot_group_map_pie(
+  data = inc_sig_fuzz_data_RH %>% filter(!is.na(Group)),
+  world_robin = world_robin,
+  grat_robin = grat_robin,
+  colors = colors_named,
+  group = "Group",
+  pie_xlim = c(0.5, 4.65),
+  map_title = "f",
+  pie_grob_area = list(xmin = -2.4e7, xmax = 0.1e7, ymin = -8e6, ymax = 1.9e6)
+)
+
+G_PFC_fuzz_RS <- plot_group_map_pie(
+  data = inc_sig_fuzz_data_RS %>% filter(!is.na(Group)),
+  world_robin = world_robin,
+  grat_robin = grat_robin,
+  colors = colors_named,
+  group = "Group",
+  pie_xlim = c(0.5, 4.65),
+  map_title = "f",
+  pie_grob_area = list(xmin = -2.4e7, xmax = 0.1e7, ymin = -8e6, ymax = 1.9e6)
+)
+
+
+```
+
+```{r senario model, echo=FALSE}
+#It will take several days, suggesting a test code
+
+#nc_RH <- nc_open("data/extdata/RH_yr_Hashimoto2015.nc")  
+#co2_RH <- ncvar_get(nc_RH, "co2", start = c(1, 1, 1, 1), count = c(-1, -1, 1, 2))         
+#lon_RH <- ncvar_get(nc_RH, varid = nc_RH$dim$lon$name)
+#lat_RH <- ncvar_get(nc_RH, varid = nc_RH$dim$lat$name)  
+#nc_close(nc_RH)
+
+#nc_RS <- nc_open("data/extdata/RS_yr_Hashimoto2015.nc")  
+#co2_RS <- ncvar_get(nc_RS, "co2", start = c(1, 1, 1, 1), count = c(-1, -1, 1, 2))         
+#lon_RS <- ncvar_get(nc_RS, varid = nc_RS$dim$lon$name)
+#lat_RS <- ncvar_get(nc_RS, varid = nc_RS$dim$lat$name)  
+#nc_close(nc_RS)
+
+do_fitting_seq_grouped <- function(data, lon, lat, start_year = 1901) {
+  nyears <- dim(data)[3]
+  results <- list()
+  
+  for (i in seq_along(lon)) {
+    for (j in seq_along(lat)) {
+      ts_data <- data[i, j, ]
+      if (all(is.na(ts_data))) next
+      final_slope <- NA
+      final_signif <- NA
+      final_year_index <- NA
+      
+      for (n in 2:nyears) {
+        df <- tibble(year_index = 1:n, data = ts_data[1:n]) %>% drop_na()
+        
+        if (nrow(df) > 1) {
+          lm_fit <- lm(data ~ year_index, data = df)
+          current_slope <- coef(lm_fit)["year_index"]
+          current_signif <- summary(lm_fit)$coefficients["year_index", "Pr(>|t|)"]
+          final_slope <- current_slope
+          final_signif <- current_signif
+          if (!is.na(current_signif) && current_signif < 0.05) {
+            final_year_index <- start_year + n - 1
+            break  
+          }
+        }
+      }
+      results <- c(results, list(list(
+        lon = lon[i], 
+        lat = lat[j], 
+        slope = final_slope, 
+        signif = final_signif, 
+        analyzed_until = final_year_index
+      )))
+    }
+  }
+  results_df <- bind_rows(results)
+  inc_sig_results <- results_df %>% 
+    filter(!is.na(slope), !is.na(signif)) %>% 
+    mutate(Group = case_when(
+      slope > 0 & signif < 0.05 ~ "INC_SIG",
+      TRUE ~ "OTHER"
+    ))
+  
+  inc_sig_count <- sum(inc_sig_results$Group == "INC_SIG")
+  valid_count <- nrow(inc_sig_results)
+  
+  inc_sig_ratio <- if (valid_count > 0) inc_sig_count / valid_count else NA
+  
+  return(inc_sig_ratio)
+}
+
+fuzz_seq <- function(x, error) {
+  x * rnorm(length(x), mean = 1, sd = error)
+}
+
+process_and_analyze_data <- function(data, lon, lat) {
+  error_seq <- seq(0, 0.19, by = 0.01)
+  inc_sig_ratios <- list()
+
+  for (error in error_seq) {
+    co2_fuzz_seq <- fuzz_seq(data, error = error) 
+    inc_sig_ratio <- do_fitting_seq_grouped(co2_fuzz_seq, lon, lat, start_year = 1901)
+    inc_sig_ratios[[as.character(error)]] <- inc_sig_ratio
+  }
+
+ inc_sig_ratios_df <- as.data.frame(do.call(rbind, inc_sig_ratios))
+  colnames(inc_sig_ratios_df) <- "inc_sig_ratio"
+  inc_sig_ratios_df$error <- error_seq
+
+  return(inc_sig_ratios_df)
+}
+```
+
+```{r , echo=FALSE}
+#RH_ratios <- process_and_analyze_data(co2_RH, lon_RH, lat_RH)
+RH_ratios$label <- "RH"
+#RS_ratios <- process_and_analyze_data(co2_RS, lon_RS, lat_RS)
+RS_ratios$label <- "RS"
+
+#all_ratios <- bind_rows(RH_ratios, RS_ratios)
+```
+
+```{r senario model 2, echo=FALSE}
+inc_sig_points_RH<- out_filtered_RH %>%
+  filter(Group == "INC_SIG" )
+inc_sig_points_RH$lon <- ifelse(inc_sig_points_RH$lon < 0, inc_sig_points_RH$lon + 360, inc_sig_points_RH$lon)
+
+inc_sig_points_RS<- out_filtered_RS %>%
+  filter(Group == "INC_SIG" )
+inc_sig_points_RS$lon <- ifelse(inc_sig_points_RS$lon < 0, inc_sig_points_RS$lon + 360, inc_sig_points_RS$lon)
+
+fuzz_seq <- function(data, error) {
+  data * rnorm(length(data), mean = 1, sd = error)
+}
+
+perform_analysis <- function(ts_data, total_years = 112) {
+    nyears <- length(ts_data) 
+    final_year_index <- NA  
+    group <- "OTHER" 
+
+    for (n in 2:nyears) {
+        df <- tibble(year_index = 1:n, co2 = ts_data[1:n]) %>% drop_na()
+
+        if (nrow(df) > 1) {
+            lm_fit <- lm(co2 ~ year_index, data = df)
+            slope <- coef(lm_fit)["year_index"]
+            signif <- summary(lm_fit)$coefficients["year_index", "Pr(>|t|)"]
+
+            if (!is.na(slope) && !is.na(signif)) {
+                if (slope > 0 && signif < 0.05) {
+                    final_year_index <- n 
+                    group <- "INC_SIG"
+                    break  
+                } else if (slope > 0 && signif >= 0.05) {
+                    group <- "INC_INSIG" 
+                } else {
+                    group <- "OTHER" 
+                }
+            }
+        }
+    }
+
+    if (is.na(final_year_index) && group == "INC_INSIG") {
+        final_year_index <- total_years
+    }
+
+    return(list(final_year_index = final_year_index, group = group))
+}
+
+resample_and_compute_stats <- function(data, n = 1000, sample_size = 50, ci = 0.95, error_value) {
+  if (length(data) < sample_size) {
+    warning(paste("Data length is less than sample size for error:", error_value))
+    return(list(mean_value = NA, lower_bound = NA, upper_bound = NA, sampled_means = NA, plot_hist = NULL,
+                initial_plot_hist = NULL, initial_mean_value = NA))
+  }
+  initial_mean_value <- mean(data, na.rm = TRUE)
+  
+  initial_plot_hist <- ggplot(data.frame(mean = data), aes(x = mean)) +
+    geom_histogram(bins = 30, fill = "gray", col = "black") +
+    geom_vline(xintercept = initial_mean_value, color = "red", size = 1) +
+    ylab("Frequency") +
+    xlab("Initial Data Mean of First Year of Significance") +
+    ggtitle(paste("Histogram of Initial Data Means (Slope > 0) - Error:", error_value))
+  
+  sampled_means <- replicate(n, mean(sample(data, size = sample_size, replace = TRUE), na.rm = TRUE))
+  lower_bound <- quantile(sampled_means, (1 - ci) / 2)
+  upper_bound <- quantile(sampled_means, 1 - (1 - ci) / 2)
+  mean_value <- mean(sampled_means)
+  
+  plot_hist <- ggplot(data.frame(mean = sampled_means), aes(x = mean)) +
+    geom_histogram(bins = 30, fill = "gray", col = "black") +
+    geom_vline(xintercept = mean_value, color = "red", size = 1) +
+    ylab("Frequency") +
+    xlab("Bootstrap Mean of First Year of Significance") +
+    ggtitle(paste("Histogram of Bootstrap Means (Slope > 0) - Error:", error_value))
+  
+  return(list(
+    mean_value = mean_value, 
+    lower_bound = lower_bound, 
+    upper_bound = upper_bound, 
+    sampled_means = sampled_means, 
+    plot_hist = plot_hist,
+    initial_plot_hist = initial_plot_hist,
+    initial_mean_value = initial_mean_value 
+  ))
+}
+
+process_data_for_error <- function(co2, lon, lat, inc_sig_points, error, resample_func) {
+    sig_up_years <- numeric()
+    
+    for (i in 1:nrow(inc_sig_points)) {
+        lon_index <- which(lon == inc_sig_points$lon[i])
+        lat_index <- which(lat == inc_sig_points$lat[i])
+        original_ts_data <- co2[lon_index, lat_index, ]
+        
+        fuzzed_ts_data <- fuzz_seq(original_ts_data, error)
+        
+        analysis_result <- perform_analysis(fuzzed_ts_data)
+        final_year_index <- analysis_result$final_year_index
+        
+        if (!is.na(final_year_index)) {
+            sig_up_years <- c(sig_up_years, final_year_index)
+        }
+    }
+    
+    if (length(sig_up_years) == 0) {
+        warning(paste("No significant increase years found for error:", error))
+    } else {
+        print(paste("Processing error:", error, "Number of significant years:", length(sig_up_years)))
+    }
+    
+    stats <- resample_func(sig_up_years, error_value = error)
+    return(stats)
+}
+
+stats_for_errors_RH <- data.frame(
+  error = numeric(),
+  mean_value = numeric(),
+  lower_bound = numeric(),
+  upper_bound = numeric()
+)
+initial_means_RH <- data.frame(
+  error = numeric(),
+  initial_mean_value = numeric()
+)
+
+stats_for_errors_RS <- data.frame(
+  error = numeric(),
+  mean_value = numeric(),
+  lower_bound = numeric(),
+  upper_bound = numeric()
+)
+initial_means_RS <- data.frame(
+  error = numeric(),
+  initial_mean_value = numeric()
+)
+
+error_seq <- seq(0.19, 0, by = -0.01)
+
+stats_for_errors_RH <- data.frame()
+for (error in error_seq) {
+   stats_RH <- process_data_for_error(co2_RH, lon_RH, lat_RH, inc_sig_points_RH, error, resample_and_compute_stats)
+  
+  if (!is.null(stats_RH) && all(c("mean_value", "lower_bound", "upper_bound", "plot_hist", "initial_plot_hist", "initial_mean_value") %in% names(stats_RH))) {
+    stats_for_errors_RH <- rbind(stats_for_errors_RH, data.frame(
+      error = error,
+      mean_value = stats_RH$mean_value, 
+      lower_bound = stats_RH$lower_bound, 
+      upper_bound = stats_RH$upper_bound
+    ))
+    
+    initial_means_RH <- rbind(initial_means_RH, data.frame(
+      error = error,
+      initial_mean_value = stats_RH$initial_mean_value
+    ))
+    
+    ggsave(filename = paste0("hist_RH_error_initial_", error, ".png"), plot = stats_RH$initial_plot_hist)
+    ggsave(filename = paste0("hist_RH_error_bootstrap_", error, ".png"), plot = stats_RH$plot_hist)
+    
+    # 打印直方图
+    print(stats_RH$initial_plot_hist)
+    print(stats_RH$plot_hist)
+    
+  }
+}
+#write.csv(stats_for_errors_RH, "stats_for_errors_RH.csv", row.names = FALSE)
+#write.csv(initial_means_RH, "initial_means_RH.csv", row.names = FALSE)
+
+
+stats_for_errors_RS <- data.frame()
+for (error in error_seq) {
+  stats_RS <- process_data_for_error(co2_RS, lon_RS, lat_RS, inc_sig_points_RS, error, resample_and_compute_stats)
+  
+  if (!is.null(stats_RS) && all(c("mean_value", "lower_bound", "upper_bound", "plot_hist", "initial_plot_hist", "initial_mean_value") %in% names(stats_RS))) {
+    stats_for_errors_RS <- rbind(stats_for_errors_RS, data.frame(
+      error = error,
+      mean_value = stats_RS$mean_value, 
+      lower_bound = stats_RS$lower_bound, 
+      upper_bound = stats_RS$upper_bound
+    ))
+    initial_means_RS <- rbind(initial_means_RS, data.frame(
+      error = error,
+      initial_mean_value = stats_RS$initial_mean_value
+    ))
+    ggsave(filename = paste0("hist_RS_error_initial_", error, ".png"), plot = stats_RS$initial_plot_hist)
+    ggsave(filename = paste0("hist_RS_error_bootstrap_", error, ".png"), plot = stats_RS$plot_hist)
+   
+    print(stats_RS$initial_plot_hist)
+    print(stats_RS$plot_hist)
+  }
+}
+
+#write.csv(stats_for_errors_RS, "stats_for_errors_RS.csv", row.names = FALSE)
+#write.csv(initial_means_RH, "initial_means_RS.csv", row.names = FALSE)
+```
+
+
+```{r plot1, echo=FALSE}
+#write.csv(RH_ratios, file = "RH_ratios.csv", row.names = FALSE)
+#write.csv(RS_ratios, file = "RS_ratios.csv", row.names = FALSE)
+
+plot_INC_SIG_Ratios_RH <- read.csv("RH_ratios.csv")
+plot_INC_SIG_Ratios_RH <- ggplot(plot_INC_SIG_Ratios_RH, aes(x = error, y = inc_sig_ratio)) +
+  geom_line(color = "#397FC7") +
+  geom_point(color = "#397FC7") +
+  labs(title = "c",
+       #x = "Coefficient of Variance (% of Mean Rs)",
+       x = "Coefficient of Variance (%)",
+       y = "Percentage of Area Showed Significant Increase (%)") +
+     scale_x_continuous(labels = scales::label_number(scale = 100) ) +
+  scale_y_continuous(position = "left", labels = scales::label_number(scale = 100)) + 
+theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1))
+  plot_INC_SIG_Ratios_RH
+#save_agu_plot("0.19RH_ratios.png")
+
+plot_INC_SIG_Ratios_RS <- read.csv("RS_ratios.csv")
+plot_INC_SIG_Ratios_RS <- ggplot(plot_INC_SIG_Ratios_RS, aes(x = error, y = inc_sig_ratio)) +
+  geom_line(color = "#397FC7") +
+  geom_point(color = "#397FC7") +
+  labs(title = "c",
+       #x = "Coefficient of Variance (% of Mean Rs)",
+       x = "Coefficient of Variance (%)",
+       y = "Percentage of Area Showed Significant Increase (%)") +
+   scale_x_continuous(labels = scales::label_number(scale = 100) ) +
+  scale_y_continuous(position = "left", labels = scales::label_number(scale = 100)) + 
+  theme_minimal() +
+    theme(panel.border = element_rect(color = "black", fill = NA, size = 1))
+  plot_INC_SIG_Ratios_RS
+#save_agu_plot("0.19RS_ratios.png")
+```
+
+```{r}
+error_seq <- seq(0, 0.19, by = 0.01)
+labels <- letters[1:length(error_seq)]  
+standard_width <- 800
+standard_height <- 600
+
+for (i in seq_along(error_seq)) {
+  error <- error_seq[i]
+  error_str <- sprintf("%.2f", error)
+  
+  initial_file <- paste0("hist_RH_error_initial_", error_str, ".png")
+  bootstrap_file <- paste0("hist_RH_error_bootstrap_", error_str, ".png")
+  
+  if (file.exists(initial_file) && file.exists(bootstrap_file)) {
+    initial_img <- image_read(initial_file) %>%
+      image_resize(paste0(standard_width, "x", standard_height, "!"))
+    bootstrap_img <- image_read(bootstrap_file) %>%
+      image_resize(paste0(standard_width, "x", standard_height, "!"))
+    
+    letter <- labels[i]
+    
+    initial_img <- image_annotate(initial_img, paste0("(", letter, "1)"), size = 40,
+                                  gravity = "northwest", location = "+70+60")
+    bootstrap_img <- image_annotate(bootstrap_img, paste0("(", letter, "2)"), size = 40,
+                                    gravity = "northwest", location = "+70+60")
+    
+    initial_raster <- rasterGrob(as.raster(initial_img), interpolate = TRUE)
+    bootstrap_raster <- rasterGrob(as.raster(bootstrap_img), interpolate = TRUE)
+    
+    combined_plot <- grid.arrange(initial_raster, bootstrap_raster, ncol = 2)
+    
+    temp_file <- paste0("temp_combined_hist_RH_error_", error_str, ".png")
+    ggsave(filename = temp_file, plot = combined_plot, width = 16, height = 12, units = "in")
+    
+    combined_img_RH <- image_read(temp_file) %>%
+      image_trim()  
+    
+    trimmed_file <- paste0("trimmed_combined_hist_RH_error_", error_str, ".png")
+    image_write(combined_img_RH, path = trimmed_file)
+    
+    file.remove(temp_file)
+    
+    print(combined_img_RH)
+  } else {
+    warning(paste("Files not found for error:", error_str))
+  }
+}
+a4_width <- 8.27
+a4_height <- 11.69
+
+images_per_page <- 10
+page_count <- ceiling(length(error_seq) / images_per_page)
+
+for (page in 1:page_count) {
+  start_idx <- (page - 1) * images_per_page + 1
+  end_idx <- min(page * images_per_page, length(error_seq))
+  
+  img_list <- list()
+  for (i in start_idx:end_idx) {
+    error <- error_seq[i]
+    error_str <- sprintf("%.2f", error)
+    
+    trimmed_file <- paste0("trimmed_combined_hist_RH_error_", error_str, ".png")
+    
+    if (file.exists(trimmed_file)) {
+      img <- rasterGrob(as.raster(image_read(trimmed_file)), interpolate = TRUE)
+      img_list[[i - start_idx + 1]] <- img
+    }
+  }
+  
+  combined_plot_RH <- marrangeGrob(grobs = img_list, nrow = 5, ncol = 2)
+  
+  output_file_RH <- paste0("RHcombined_page_", page, ".pdf")
+  ggsave(output_file_RH, plot = combined_plot_RH, device = "pdf", width = a4_width, height = a4_height)
+  
+  print(combined_plot_RH)
+}
+
+
+for (i in seq_along(error_seq)) {
+  error <- error_seq[i]
+  error_str <- sprintf("%.2f", error)
+  
+  initial_file <- paste0("hist_RS_error_initial_", error_str, ".png")
+  bootstrap_file <- paste0("hist_RS_error_bootstrap_", error_str, ".png")
+  
+  if (file.exists(initial_file) && file.exists(bootstrap_file)) {
+    initial_img <- image_read(initial_file) %>%
+      image_resize(paste0(standard_width, "x", standard_height, "!"))
+    bootstrap_img <- image_read(bootstrap_file) %>%
+      image_resize(paste0(standard_width, "x", standard_height, "!"))
+    
+    letter <- labels[i]
+    
+    initial_img <- image_annotate(initial_img, paste0("(", letter, "1)"), size = 40,
+                                  gravity = "northwest", location = "+70+60")
+    bootstrap_img <- image_annotate(bootstrap_img, paste0("(", letter, "2)"), size = 40,
+                                    gravity = "northwest", location = "+70+60")
+    
+    initial_raster <- rasterGrob(as.raster(initial_img), interpolate = TRUE)
+    bootstrap_raster <- rasterGrob(as.raster(bootstrap_img), interpolate = TRUE)
+    
+    combined_plot <- grid.arrange(initial_raster, bootstrap_raster, ncol = 2)
+    
+    temp_file <- paste0("temp_combined_hist_RS_error_", error_str, ".png")
+    ggsave(filename = temp_file, plot = combined_plot, width = 16, height = 12, units = "in")
+    
+    combined_img <- image_read(temp_file) %>%
+      image_trim()
+    
+    trimmed_file <- paste0("trimmed_combined_hist_RS_error_", error_str, ".png")
+    image_write(combined_img, path = trimmed_file)
+    file.remove(temp_file)
+    
+    print(combined_img)
+  } else {
+    warning(paste("Files not found for error:", error_str))
+  }
+}
+a4_width <- 8.27
+a4_height <- 11.69
+
+images_per_page <- 10
+page_count <- ceiling(length(error_seq) / images_per_page)
+
+for (page in 1:page_count) {
+  start_idx <- (page - 1) * images_per_page + 1
+  end_idx <- min(page * images_per_page, length(error_seq))
+  
+  img_list <- list()
+  for (i in start_idx:end_idx) {
+    error <- error_seq[i]
+    error_str <- sprintf("%.2f", error)
+    
+    trimmed_file <- paste0("trimmed_combined_hist_RS_error_", error_str, ".png")
+    
+    if (file.exists(trimmed_file)) {
+      img <- rasterGrob(as.raster(image_read(trimmed_file)), interpolate = TRUE)
+      img_list[[i - start_idx + 1]] <- img
+    }
+  }
+  
+  combined_plot_RS <- marrangeGrob(grobs = img_list, nrow = 5, ncol = 2)
+  
+  output_file <- paste0("RScombined_page_", page, ".pdf")
+  ggsave(output_file, plot = combined_plot_RS, device = "pdf", width = a4_width, height = a4_height)
+  
+  print(combined_plot_RS)
+}
+```
+
+```{r plot2, echo=FALSE}
+
+stats_for_errors_RH <- read.csv("stats_for_errors_RH.csv")
+plot_RH <- ggplot(stats_for_errors_RH, aes(x = error, y = mean_value, color = "RH", fill = "RH")) +
+  geom_line() +
+  geom_point() +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), alpha = 0.35) +
+  labs(title = "d",
+       x = "Coefficient of Variance (%)",
+       #x = "Coefficient of Variance (% of Mean Rs)",
+       y = "Successive Measurement Duration (yr)") +
+      scale_x_continuous(labels = scales::label_number(scale = 100) ) +
+      scale_y_continuous(position = "right") + 
+  scale_color_manual(values = c("RH" = "#397FC7"), name = "Legend") +
+  scale_fill_manual(values = c("RH" = "#B0E1E7"), name = "Legend") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.position = "none" ) 
+print(plot_RH)
+
+
+stats_for_errors_RS <- read.csv("stats_for_errors_RS.csv")
+plot_RS <- ggplot(stats_for_errors_RS, aes(x = error, y = mean_value, color = "RS", fill = "RS")) +
+ geom_line() +
+  geom_point() +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), alpha = 0.35) +
+  labs(title = "d",
+      x = "Coefficient of Variance (%)",
+       #x = "Coefficient of Variance (% of Mean Rs)",
+       y = "Successive Measurement Duration (yr)") +
+    scale_x_continuous(labels = scales::label_number(scale = 100) ) +
+    scale_y_continuous(position = "right") + 
+ scale_color_manual(values = c("RS" = "#397FC7"), name = "Legend") +
+  scale_fill_manual(values = c("RS" = "#B0E1E7"), name = "Legend") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),
+        legend.position = "none")  
+print(plot_RS)
+```
+
+
