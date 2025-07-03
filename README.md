@@ -1,6 +1,6 @@
 # Longterm_CV
 
-# Soil Respiration Trend Detectability Under Observational Variances
+# Soil Respiration Trend Detectability Under Measurement Variances
 
 This repository provides R scripts and functions for quantifying how observational errors affect the detectability of significant long-term trends in soil respiration (Rs) and heterotrophic respiration (Rh) across global gridded datasets (e.g., Hashimoto et al. 2015).
 
